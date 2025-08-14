@@ -5,7 +5,6 @@ import {
   ElementRef,
   inject,
   OnDestroy,
-  OnInit,
   ViewChild,
 } from '@angular/core';
 import {environment} from '../../../../environments/environment';
@@ -17,7 +16,7 @@ import * as h3 from 'h3-js'
 import { HexWorkerResult, WorkerPool } from '../../worker/worker-pool';
 import {IndexDB} from '../../../core/store/index-db';
 
-const DEFAULT_ZOOM = 7;
+const DEFAULT_ZOOM = 6;
 const MAX_DEFAULT_ZOOM = 16;
 
 const zoomToResolution: { [zoom: number]: number } = {
@@ -80,6 +79,7 @@ export class MapComponent implements AfterViewInit, OnDestroy {
       return
     }
     this.clearHexPolygons();
+    this.pool.cleanupAllWorkers();
     // const bounds = map.getBounds();
     // const ne = bounds?.getNorthEast();
     // const sw = bounds?.getSouthWest();
@@ -108,8 +108,12 @@ export class MapComponent implements AfterViewInit, OnDestroy {
         polygonColor: feature.properties.COLOR_HEX
       });
 
-      this.drawHexes(result);
-      await firstValueFrom(this.indexDB.setToDB$(cacheKey, result));
+      if (result) {
+        this.drawHexes(result);
+        await firstValueFrom(this.indexDB.setToDB$(cacheKey, result));
+      } else {
+        this.clearHexPolygons();
+      }
     }
   }
 
@@ -119,9 +123,9 @@ export class MapComponent implements AfterViewInit, OnDestroy {
       this.renderHexagons(cellIds, (polygonPath) => {
         const polygon = new google.maps.Polygon({
           paths: polygonPath,
-          strokeColor: data.polygonColor ? `#${data.polygonColor}` : '#FF0000',
+          strokeColor: `#${data.polygonColor}`,
           strokeWeight: 1,
-          fillColor: data.polygonColor ? `#${data.polygonColor}` : '#FFAAAA',
+          fillColor: `#${data.polygonColor}`,
           fillOpacity: 0.5,
           map: this.map,
         });
@@ -139,6 +143,10 @@ export class MapComponent implements AfterViewInit, OnDestroy {
       const boundary = h3.cellToBoundary(cellId);
       const path = boundary.map(([lat, lng]) => ({lat, lng}));
 
+      if (JSON.stringify(path[0]) !== JSON.stringify(path[path.length - 1])) {
+        path.push(path[0])
+      }
+
       func(path);
     });
   }
@@ -148,9 +156,10 @@ export class MapComponent implements AfterViewInit, OnDestroy {
     if ('google' in window) {
       // @ts-ignore
       const feature = centroid(data);
+      const [lat, lng] = feature.geometry.coordinates;
       const center = {
-        lat: feature.geometry.coordinates[0],
-        lng: feature.geometry.coordinates[1],
+        lat: lat,
+        lng: lng,
       }
       console.log('Center', center)
       this.map = new google.maps.Map(this.mapContainer.nativeElement, {
@@ -167,6 +176,7 @@ export class MapComponent implements AfterViewInit, OnDestroy {
 
       this.updateHexagons(this.map, data.features, resolution);
 
+      // const throttledUpdatedHexagons = throttle(this.updateHexagons.bind(this), 500);
       this.map.addListener('zoom_changed', () => {
         const zoom = this.map?.getZoom() || DEFAULT_ZOOM;
         const updatedResolution = this.getResolutionForZoom(zoom)
@@ -179,7 +189,6 @@ export class MapComponent implements AfterViewInit, OnDestroy {
         }
       });
 
-      // const throttledUpdatedHexagons = throttle(this.updateHexagons.bind(this), 500);
       // this.currentMapBounds = this.map.getBounds();
       //
       // this.map.addListener("bounds_changed", () => {

@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 import * as h3 from 'h3-js';
+import {Feature} from './app/core/services/map/map.service';
 
 console.log('Init Worker');
 
@@ -12,15 +13,16 @@ addEventListener('message', async ({ data }) => {
 
   try {
     const allCellIds: string[] = [];
-
-    ringSet.forEach((polygon: number[][]) => {
-      const cellIds = h3.polygonToCellsExperimental(polygon, resolution, h3.POLYGON_TO_CELLS_FLAGS.containmentOverlapping);
+    const rings = ringSet as Feature['geometry']['coordinates'];
+    rings.forEach((polygon) => {
+      const cellIds = h3.polygonToCellsExperimental(polygon, resolution, h3.POLYGON_TO_CELLS_FLAGS.containmentOverlappingBbox);
       allCellIds.push(...cellIds);
     })
 
-    const uniqueCellIds = Array.from(new Set(allCellIds));
+
+    // const uniqueCellIds = Array.from(new Set(allCellIds));
     const result = {
-      cellIds: uniqueCellIds,
+      cellIds: allCellIds,
       fromCache: false,
       polygonColor: polygonColor
     }
@@ -29,17 +31,3 @@ addEventListener('message', async ({ data }) => {
     postMessage({ error: e.message || e.toString() });
   }
 });
-
-function traverseCoordinates(coords: any[], callback: (ring: [number, number][]) => void) {
-  if (!Array.isArray(coords)) return;
-
-  if (typeof coords[0] === 'number') {
-    return;
-  }
-
-  if (typeof coords[0][0] === 'number') {
-    callback(coords as [number, number][]);
-  } else {
-    coords.forEach(c => traverseCoordinates(c, callback));
-  }
-}

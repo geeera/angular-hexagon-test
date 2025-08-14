@@ -68,6 +68,12 @@ export class WorkerPool {
     if (next) this.runTask(worker, next);
   };
 
+  cleanupAllWorkers() {
+    this.busyWorkers.clear();
+    this.queues.forEach(q => q.resolve(null))
+    this.queues = [];
+  }
+
   private runTask(worker: Worker, task: { data: any; resolve: Function; reject: Function }, fromQueses = false ) {
     // console.log('Run task', worker)
     const { data, resolve, reject } = task;

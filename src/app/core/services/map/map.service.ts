@@ -1,11 +1,8 @@
 import {inject, Injectable} from '@angular/core';
 // import data from '../../../../../data/data.json';
 import {map} from 'rxjs';
-import proj4 from 'proj4';
 import {HttpClient} from '@angular/common/http';
-
-const epsg3857 = 'EPSG:3857';
-const epsg4326 = 'EPSG:4326';
+import { convertToEPSG4326 } from '../../../shared/functions/proj4';
 
 export interface Feature {
   type: string,
@@ -19,7 +16,7 @@ export interface Feature {
         name: "urn:ogc:def:crs:EPSG::3857"
       }
     },
-    coordinates: number[][][]
+    coordinates: number[][][][]
   }
 }
 
@@ -62,8 +59,9 @@ export class MapService {
   }
 
   private convertCoordsNested(coords: any, fromType?: string): any {
-    return this.updatedCoords(coords, (nestedCoords) => {
-      return proj4(fromType || epsg3857, epsg4326, nestedCoords);
+    return this.updatedCoords(coords, (nestedCoords: [number, number]) => {
+      const [lat, lng] = nestedCoords;
+      return convertToEPSG4326([lng, lat], fromType);
     })
   }
 
