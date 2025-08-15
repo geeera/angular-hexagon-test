@@ -10,11 +10,18 @@ import {
 import {environment} from '../../../../environments/environment';
 
 import centroid from '@turf/centroid';
-import {Feature, MapData, MapService} from '../../../core/services/map/map.service';
-import {firstValueFrom} from 'rxjs';
-import * as h3 from 'h3-js'
+import {MapData, MapService} from '../../../core/services/map/map.service';
+import {
+  debounceTime,
+  filter,
+  firstValueFrom,
+  startWith,
+  Subject,
+  switchMap,
+  takeUntil,
+  tap
+} from 'rxjs';
 import { HexWorkerResult, WorkerPool } from '../../worker/worker-pool';
-import {IndexDB} from '../../../core/store/index-db';
 
 const DEFAULT_ZOOM = 6;
 const MAX_DEFAULT_ZOOM = 16;
@@ -52,21 +59,43 @@ const zoomToResolution: { [zoom: number]: number } = {
 })
 export class MapComponent implements AfterViewInit, OnDestroy {
   private mapService = inject(MapService);
-  private indexDB = inject(IndexDB);
-  private pool: WorkerPool = new WorkerPool();
+  private pool: WorkerPool = new WorkerPool(1);
+  private _destroy$: Subject<void> = new Subject();
   @ViewChild('mapContainer', { static: false }) mapContainer!: ElementRef;
 
   private map!: google.maps.Map;
   private hexPolygons: google.maps.Polygon[] = [];
 
-  private currentZoom = DEFAULT_ZOOM;
-  // private currentMapBounds: LatLngBounds | undefined;
   private currentResolution: number = this.getResolutionForZoom(DEFAULT_ZOOM);
 
   ngAfterViewInit() {
     this.loadGoogleMapsApiScript(environment.googleMapsApiKey, async () => {
       const geojsonData = await firstValueFrom(this.mapService.loadPolygonData());
-      this.initMap(geojsonData);
+      const core = this.initMap(geojsonData);
+      core.subs.zoomChanged$.pipe(
+        startWith(null),
+        takeUntil(this._destroy$),
+        filter(() => {
+          const resolution = this.getResolutionForZoom(this.map.getZoom() || DEFAULT_ZOOM);
+          return resolution === this.currentResolution;
+        }),
+        tap(() => {
+          this.currentResolution = this.getResolutionForZoom(this.map.getZoom() || DEFAULT_ZOOM);
+          this.clearHexPolygons();
+          this.pool.cleanupAllWorkers();
+        }),
+        debounceTime(300),
+        switchMap(() => {
+          const resolution = this.getResolutionForZoom(this.map.getZoom() || DEFAULT_ZOOM);
+          return this.pool.run$(geojsonData, resolution).pipe(
+            tap((result) => {
+              if (result) {
+                this.drawHexes(result as HexWorkerResult);
+              }
+            })
+          );
+        }),
+      ).subscribe()
     });
   }
 
@@ -74,84 +103,21 @@ export class MapComponent implements AfterViewInit, OnDestroy {
     return zoomToResolution[zoom]
   }
 
-  async updateHexagons(map: google.maps.Map, features: Feature[], resolution: number) {
-    if (!map) {
-      return
-    }
-    this.clearHexPolygons();
-    this.pool.cleanupAllWorkers();
-    // const bounds = map.getBounds();
-    // const ne = bounds?.getNorthEast();
-    // const sw = bounds?.getSouthWest();
-
-    // const visibleFeatures = features.filter(f => {
-    //   return this.mapService.updatedCoords(f.geometry.coordinates, ([lat, lng]) => {
-    //     if (sw && ne) {
-    //       return lat >= sw.lat() && lat <= ne.lat() && lng >= sw.lng() && lng <= ne.lng()
-    //     }
-    //     return true
-    //   })
-    //   }
-    // );
-
-    for (const feature of features) {
-      const cacheKey = `feature-${feature.id}-${resolution}`;
-      const cached = await firstValueFrom(this.indexDB.getFromDB$(cacheKey));
-      if (cached) {
-        this.drawHexes(cached);
-        continue;
-      }
-
-      const result: HexWorkerResult = await this.pool.run({
-        ringSet: feature.geometry.coordinates,
-        resolution,
-        polygonColor: feature.properties.COLOR_HEX
-      });
-
-      if (result) {
-        this.drawHexes(result);
-        await firstValueFrom(this.indexDB.setToDB$(cacheKey, result));
-      } else {
-        this.clearHexPolygons();
-      }
-    }
-  }
-
   drawHexes(data: HexWorkerResult) {
-    if (data.cellIds?.length) {
-      const cellIds: string[] = data.cellIds;
-      this.renderHexagons(cellIds, (polygonPath) => {
-        const polygon = new google.maps.Polygon({
-          paths: polygonPath,
-          strokeColor: `#${data.polygonColor}`,
-          strokeWeight: 1,
-          fillColor: `#${data.polygonColor}`,
-          fillOpacity: 0.5,
-          map: this.map,
-        });
-        this.hexPolygons.push(polygon);
+    if (data.paths?.length) {
+      const polygon = new google.maps.Polygon({
+        paths: data.paths,
+        strokeColor: `#${data.color}`,
+        strokeWeight: 1,
+        fillColor: `#${data.color}`,
+        fillOpacity: 0.5,
+        map: this.map,
       });
+      this.hexPolygons.push(polygon);
     }
   }
 
-  renderHexagons(cellIds: string[], func: (path: { lat: number, lng: number }[]) => void) {
-    if (!cellIds?.length) {
-      return;
-    }
-
-    cellIds.forEach(cellId => {
-      const boundary = h3.cellToBoundary(cellId);
-      const path = boundary.map(([lat, lng]) => ({lat, lng}));
-
-      if (JSON.stringify(path[0]) !== JSON.stringify(path[path.length - 1])) {
-        path.push(path[0])
-      }
-
-      func(path);
-    });
-  }
-
-  initMap(data: MapData) {
+  initMap(data: MapData): any {
     console.log('Initializing Map...');
     if ('google' in window) {
       // @ts-ignore
@@ -172,35 +138,22 @@ export class MapComponent implements AfterViewInit, OnDestroy {
         noClear: false
       });
 
-      const resolution = this.getResolutionForZoom(this.map?.getZoom() || DEFAULT_ZOOM)
-
-      this.updateHexagons(this.map, data.features, resolution);
-
-      // const throttledUpdatedHexagons = throttle(this.updateHexagons.bind(this), 500);
+      const zoomChanged$ = new Subject<void>();
+      zoomChanged$.next(); // handle initial render
       this.map.addListener('zoom_changed', () => {
-        const zoom = this.map?.getZoom() || DEFAULT_ZOOM;
-        const updatedResolution = this.getResolutionForZoom(zoom)
-        const isResolutionChanged = this.currentResolution !== updatedResolution
-        if (zoom !== this.currentZoom && isResolutionChanged) {
-          this.currentZoom = zoom;
-          this.currentResolution = updatedResolution;
+        zoomChanged$.next();
 
-          this.updateHexagons(this.map, data.features, updatedResolution);
+        return () => {
+          zoomChanged$.complete();
         }
-      });
+      })
 
-      // this.currentMapBounds = this.map.getBounds();
-      //
-      // this.map.addListener("bounds_changed", () => {
-      //   const updatedMapBounds = this.map.getBounds();
-      //   if (this.currentMapBounds && JSON.stringify(this.currentMapBounds) !== JSON.stringify(updatedMapBounds)) {
-      //     console.log('bounds_changed');
-      //     const zoom = this.map?.getZoom() || DEFAULT_ZOOM;
-      //     const updatedResolution = this.getResolutionForZoom(zoom)
-      //     throttledUpdatedHexagons(this.map, data.features, updatedResolution);
-      //     this.currentMapBounds = updatedMapBounds;
-      //   }
-      // });
+      return {
+        map: this.map,
+        subs: {
+          zoomChanged$: zoomChanged$.asObservable()
+        }
+      }
     }
   }
 
@@ -223,8 +176,13 @@ export class MapComponent implements AfterViewInit, OnDestroy {
   }
 
   ngOnDestroy() {
+    if (this._destroy$) {
+      this._destroy$.next();
+      this._destroy$.complete();
+      console.log('destroySub$');
+    }
+
     this.clearHexPolygons();
     this.pool.destroyWorkers();
-    this.indexDB.closeDB();
   }
 }

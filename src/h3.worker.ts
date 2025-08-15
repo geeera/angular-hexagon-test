@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 import * as h3 from 'h3-js';
-import {Feature} from './app/core/services/map/map.service';
+import {Feature, MapData} from './app/core/services/map/map.service';
 
 console.log('Init Worker');
 
@@ -9,24 +9,29 @@ addEventListener('error', (e) => {
 });
 
 addEventListener('message', async ({ data }) => {
-  const { ringSet, resolution, polygonColor } = data;
+  const { geo, resolution } = data;
 
   try {
-    const allCellIds: string[] = [];
-    const rings = ringSet as Feature['geometry']['coordinates'];
-    rings.forEach((polygon) => {
-      const cellIds = h3.polygonToCellsExperimental(polygon, resolution, h3.POLYGON_TO_CELLS_FLAGS.containmentOverlappingBbox);
-      allCellIds.push(...cellIds);
+    const features = (geo as MapData).features;
+    features.forEach(feature => {
+      const rings = feature.geometry.coordinates;
+      rings.forEach((polygon) => {
+        const cellIds = h3.polygonToCellsExperimental(polygon, resolution, h3.POLYGON_TO_CELLS_FLAGS.containmentOverlapping);
+
+        cellIds.forEach(cellId => {
+          const boundary = h3.cellToBoundary(cellId);
+          const paths = boundary.map(([lat, lng]) => ({lat, lng}));
+
+          if (JSON.stringify(paths[0]) !== JSON.stringify(paths[paths.length - 1])) {
+            paths.push(paths[0])
+          }
+
+          postMessage({ paths: paths, color: feature.properties.COLOR_HEX, isClose: false });
+        });
+      })
     })
 
-
-    // const uniqueCellIds = Array.from(new Set(allCellIds));
-    const result = {
-      cellIds: allCellIds,
-      fromCache: false,
-      polygonColor: polygonColor
-    }
-    postMessage(result);
+    postMessage({ isClose: true })
   } catch (e: any) {
     postMessage({ error: e.message || e.toString() });
   }
